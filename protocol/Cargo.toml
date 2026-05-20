@@ -1,0 +1,10 @@
+[package]
+name = "pico-keeb-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared command protocol for pico-keeb firmware and host CLI"
+
+[lib]
+path = "src/lib.rs"

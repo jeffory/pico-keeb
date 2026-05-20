@@ -1,0 +1,18 @@
+[package]
+name = "pico-keeb-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side CLI for pico-keeb"
+
+[[bin]]
+name = "pico-keeb-cli"
+path = "src/main.rs"
+
+[dependencies]
+pico-keeb-protocol = { path = "../protocol" }
+clap = { version = "4.5", features = ["derive"] }
+serialport = "4.5"
+anyhow = "1"
+crossterm = "0.28"

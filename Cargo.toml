@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["protocol", "host-cli"]
+exclude = ["firmware"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jeffory/pico-keeb"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+debug = 2
