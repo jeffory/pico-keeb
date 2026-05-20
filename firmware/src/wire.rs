@@ -6,7 +6,7 @@ use embassy_sync::channel::Channel;
 use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter;
 use embedded_io_async::{Read, Write};
-use pico_keeb_protocol::binary::{Decoder, Frame, ACK};
+use pico_keeb_protocol::binary::{Decoder, Frame, ACK, NAK};
 use usbd_hid::descriptor::{KeyboardReport, MediaKeyboardReport, MouseReport};
 
 use crate::led::{LedEvent, LED_SIG};
@@ -41,45 +41,53 @@ pub async fn uart_task(mut uart: BufferedUart) {
         };
         for &b in &buf[..n] {
             if let Some(frame) = decoder.feed(b) {
-                dispatch(frame).await;
-                let _ = uart.write_all(&[ACK]).await;
+                let delivered = dispatch(frame).await;
+                let reply = if delivered { ACK } else { NAK };
+                let _ = uart.write_all(&[reply]).await;
                 let _ = uart.flush().await;
-                LED_SIG.signal(LedEvent::Ok);
+                LED_SIG.signal(if delivered { LedEvent::Ok } else { LedEvent::Err });
             }
         }
     }
 }
 
-async fn dispatch(frame: Frame) {
-    // try_send + drop-on-full: if the HID target isn't polling its IN
-    // endpoint, the channel fills once and all subsequent reports are
-    // dropped. That keeps the ACK path responsive and prevents stale
-    // reports from firing when a target eventually reconnects.
+/// Enqueue the frame's HID report. Returns `false` if the destination
+/// channel was full and the report was dropped — the caller turns that
+/// into a `NAK` so the host can detect the silent loss. `Reset` always
+/// returns `true` because it drains its targets first.
+async fn dispatch(frame: Frame) -> bool {
     match frame {
-        Frame::Kbd { modifiers, keys } => {
-            let _ = KBD_CHAN.try_send(KeyboardReport {
+        Frame::Kbd { modifiers, keys } => KBD_CHAN
+            .try_send(KeyboardReport {
                 modifier: modifiers,
                 reserved: 0,
                 leds: 0,
                 keycodes: keys,
-            });
-        }
-        Frame::Mouse { buttons, dx, dy, wheel } => {
-            let _ = MOUSE_CHAN.try_send(MouseReport {
+            })
+            .is_ok(),
+        Frame::Mouse { buttons, dx, dy, wheel } => MOUSE_CHAN
+            .try_send(MouseReport {
                 buttons,
                 x: dx,
                 y: dy,
                 wheel,
                 pan: 0,
-            });
-        }
-        Frame::Consumer { usage } => {
-            let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: usage });
-        }
+            })
+            .is_ok(),
+        Frame::Consumer { usage } => CONSUMER_CHAN
+            .try_send(MediaKeyboardReport { usage_id: usage })
+            .is_ok(),
         Frame::Delay { ms } => {
             Timer::after_millis(ms as u64).await;
+            true
         }
         Frame::Reset => {
+            // Drain any pending reports so the all-zeros "release everything"
+            // payload is what the HID writers see next, even if the channels
+            // were full when Reset arrived.
+            while KBD_CHAN.try_receive().is_ok() {}
+            while MOUSE_CHAN.try_receive().is_ok() {}
+            while CONSUMER_CHAN.try_receive().is_ok() {}
             let _ = KBD_CHAN.try_send(KeyboardReport {
                 modifier: 0,
                 reserved: 0,
@@ -94,6 +102,7 @@ async fn dispatch(frame: Frame) {
                 pan: 0,
             });
             let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: 0 });
+            true
         }
     }
 }

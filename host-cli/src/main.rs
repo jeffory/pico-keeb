@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use pico_keeb_protocol::binary::{Frame, ACK, MAX_ENCODED_LEN};
+use pico_keeb_protocol::binary::{Frame, ACK, MAX_ENCODED_LEN, NAK};
 use pico_keeb_protocol::keymap;
 use pico_keeb_protocol::names;
 use pico_keeb_protocol::{KeyChord, MouseButton, MOD_LSHIFT};
@@ -189,6 +189,7 @@ impl Link {
             self.port.read_exact(&mut b).context("reading ack")?;
             match b[0] {
                 ACK => return Ok(()),
+                NAK => return Err(anyhow!("firmware NAK: HID channel full, report dropped")),
                 // Tolerate stray bytes (e.g. the boot banner on first connect).
                 _ => continue,
             }
