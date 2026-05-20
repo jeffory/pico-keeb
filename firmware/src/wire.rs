@@ -1,3 +1,4 @@
+use defmt::warn;
 use embassy_rp::peripherals::USB;
 use embassy_rp::uart::BufferedUart;
 use embassy_rp::usb::Driver as UsbDriver;
@@ -10,6 +11,12 @@ use pico_keeb_protocol::binary::{Decoder, Frame, ACK};
 use usbd_hid::descriptor::{KeyboardReport, MediaKeyboardReport, MouseReport};
 
 use crate::led::{LedEvent, LED_SIG};
+
+// Cap on a single Delay frame. The UART RX buffer is 1024 B and at
+// 921600 baud fills in ~83 ms, so a long inline delay would overflow
+// the FIFO and desync the decoder. 5 s covers any realistic macro
+// pause; longer pauses must be chunked by the host.
+const MAX_DELAY_MS: u32 = 5_000;
 
 type UsbDriverT = UsbDriver<'static, USB>;
 
@@ -77,7 +84,13 @@ async fn dispatch(frame: Frame) {
             let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: usage });
         }
         Frame::Delay { ms } => {
-            Timer::after_millis(ms as u64).await;
+            let clamped = if ms > MAX_DELAY_MS {
+                warn!("DELAY {} ms clamped to {} ms", ms, MAX_DELAY_MS);
+                MAX_DELAY_MS
+            } else {
+                ms
+            };
+            Timer::after_millis(clamped as u64).await;
         }
         Frame::Reset => {
             let _ = KBD_CHAN.try_send(KeyboardReport {
