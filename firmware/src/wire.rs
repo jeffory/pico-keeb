@@ -1,3 +1,4 @@
+use defmt::warn;
 use embassy_rp::peripherals::USB;
 use embassy_rp::uart::BufferedUart;
 use embassy_rp::usb::Driver as UsbDriver;
@@ -100,7 +101,13 @@ async fn dispatch(frame: Frame) -> bool {
         #[cfg(feature = "mister")]
         Frame::Consumer { .. } => false,
         Frame::Delay { ms } => {
-            Timer::after_millis(ms.min(MAX_DELAY_MS) as u64).await;
+            let clamped = if ms > MAX_DELAY_MS {
+                warn!("DELAY {} ms clamped to {} ms", ms, MAX_DELAY_MS);
+                MAX_DELAY_MS
+            } else {
+                ms
+            };
+            Timer::after_millis(clamped as u64).await;
             true
         }
         Frame::Reset => {

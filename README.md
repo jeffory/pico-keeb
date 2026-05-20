@@ -188,7 +188,7 @@ One command per line, `\n`-terminated, case-insensitive, ASCII.
 | `CLICK <LEFT\|RIGHT\|MIDDLE>` | — | down + up |
 | `SCROLL <n>` | signed i8 | vertical wheel |
 | `MEDIA <PLAY\|PAUSE\|NEXT\|PREV\|VOLUP\|VOLDN\|MUTE>` | — | consumer control |
-| `DELAY <ms>` | u32 | pause command processing |
+| `DELAY <ms>` | u32 | pause command processing; firmware clamps to 5000 ms (chunk longer pauses on the host) |
 | `RESET` | — | release all keys, modifiers, buttons |
 
 Recognised modifier names: `CTRL`, `SHIFT`, `ALT`, `GUI` (and `WIN`, `CMD`,
