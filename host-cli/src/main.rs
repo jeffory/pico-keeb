@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use pico_keeb_protocol::binary::{Frame, ACK, MAX_ENCODED_LEN};
+use pico_keeb_protocol::binary::{Frame, ACK, NAK, MAX_ENCODED_LEN};
 use pico_keeb_protocol::keymap;
 use pico_keeb_protocol::names;
 use pico_keeb_protocol::{KeyChord, MouseButton, MOD_LSHIFT};
@@ -89,7 +89,7 @@ fn main() -> Result<()> {
 
     let _ = port.clear(serialport::ClearBuffer::Input);
 
-    let mut link = Link::new(port, cli.no_ack, cli.key_hold_ms);
+    let mut link = Link::new(port, cli.no_ack, cli.key_hold_ms, cli.timeout_ms);
     let mut state = HeldState::load(&cli.port);
 
     match cli.cmd {
@@ -150,11 +150,12 @@ struct Link {
     port: Box<dyn SerialPort>,
     no_ack: bool,
     key_hold_ms: u32,
+    timeout_ms: u64,
 }
 
 impl Link {
-    fn new(port: Box<dyn SerialPort>, no_ack: bool, key_hold_ms: u32) -> Self {
-        Self { port, no_ack, key_hold_ms }
+    fn new(port: Box<dyn SerialPort>, no_ack: bool, key_hold_ms: u32, timeout_ms: u64) -> Self {
+        Self { port, no_ack, key_hold_ms, timeout_ms }
     }
 
     /// If `--key-hold-ms` is non-zero, send a DELAY frame so a queued press
@@ -184,13 +185,24 @@ impl Link {
     }
 
     fn await_ack(&mut self) -> Result<()> {
+        const MAX_DRAIN: u32 = 64;
+        let deadline = Instant::now() + Duration::from_millis(self.timeout_ms);
         let mut b = [0u8; 1];
+        let mut drained: u32 = 0;
         loop {
+            if Instant::now() >= deadline {
+                return Err(anyhow!("ack timeout"));
+            }
             self.port.read_exact(&mut b).context("reading ack")?;
             match b[0] {
                 ACK => return Ok(()),
-                // Tolerate stray bytes (e.g. the boot banner on first connect).
-                _ => continue,
+                NAK => return Err(anyhow!("firmware NAK")),
+                _ => {
+                    drained += 1;
+                    if drained >= MAX_DRAIN {
+                        return Err(anyhow!("ack timeout"));
+                    }
+                }
             }
         }
     }
