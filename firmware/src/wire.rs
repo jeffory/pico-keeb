@@ -6,8 +6,10 @@ use embassy_sync::channel::Channel;
 use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter;
 use embedded_io_async::{Read, Write};
-use pico_keeb_protocol::binary::{Decoder, Frame, ACK};
-use usbd_hid::descriptor::{KeyboardReport, MediaKeyboardReport, MouseReport};
+use pico_keeb_protocol::binary::{Decoder, Frame, ACK, NAK};
+use usbd_hid::descriptor::KeyboardReport;
+#[cfg(not(feature = "mister"))]
+use usbd_hid::descriptor::{MediaKeyboardReport, MouseReport};
 
 use crate::led::{LedEvent, LED_SIG};
 
@@ -20,12 +22,19 @@ pub type MouseWriter = HidWriter<'static, UsbDriverT, 8>;
 pub type ConsumerWriter = HidWriter<'static, UsbDriverT, 2>;
 
 // HID reports are queued through bounded channels so the UART task can
-// ACK each frame the instant it's decoded, without waiting for the USB
-// host to poll the IN endpoint.
+// reply to each frame the instant it's decoded, without waiting for the
+// USB host to poll the IN endpoint.
 pub static KBD_CHAN: Channel<CriticalSectionRawMutex, KeyboardReport, 32> = Channel::new();
+#[cfg(not(feature = "mister"))]
 pub static MOUSE_CHAN: Channel<CriticalSectionRawMutex, MouseReport, 32> = Channel::new();
+#[cfg(not(feature = "mister"))]
 pub static CONSUMER_CHAN: Channel<CriticalSectionRawMutex, MediaKeyboardReport, 16> =
     Channel::new();
+
+/// Largest DELAY the firmware will honour in a single frame. Longer waits
+/// would starve the UART task and overflow its 1024-byte RX buffer at
+/// 921600 baud (~83 ms to fill). The host must chunk longer waits itself.
+const MAX_DELAY_MS: u32 = 5_000;
 
 #[embassy_executor::task]
 pub async fn uart_task(mut uart: BufferedUart) {
@@ -41,59 +50,91 @@ pub async fn uart_task(mut uart: BufferedUart) {
         };
         for &b in &buf[..n] {
             if let Some(frame) = decoder.feed(b) {
-                dispatch(frame).await;
-                let _ = uart.write_all(&[ACK]).await;
+                let ok = dispatch(frame).await;
+                let _ = uart.write_all(&[if ok { ACK } else { NAK }]).await;
                 let _ = uart.flush().await;
-                LED_SIG.signal(LedEvent::Ok);
+                LED_SIG.signal(if ok { LedEvent::Ok } else { LedEvent::Err });
             }
         }
     }
 }
 
-async fn dispatch(frame: Frame) {
-    // try_send + drop-on-full: if the HID target isn't polling its IN
-    // endpoint, the channel fills once and all subsequent reports are
-    // dropped. That keeps the ACK path responsive and prevents stale
-    // reports from firing when a target eventually reconnects.
+/// Returns true on ACK-worthy outcome, false to signal NAK to the host.
+///
+/// For per-frame report enqueues (Kbd/Mouse/Consumer) a full channel means
+/// the target PC has stopped polling its USB IN endpoint and queued reports
+/// have nowhere to drain. We surface that as NAK so the host doesn't
+/// quietly lose keystrokes — see HOM-130. The README's "silently drop when
+/// no target is present" remains accurate for the *try_send* outcome, but
+/// the wire-level reply now honestly reflects whether the report landed.
+///
+/// Reset is the panic button for "release everything that's currently
+/// held"; if the channel was full we drain it first so the all-zeros
+/// report cannot be the one that's dropped.
+async fn dispatch(frame: Frame) -> bool {
     match frame {
-        Frame::Kbd { modifiers, keys } => {
-            let _ = KBD_CHAN.try_send(KeyboardReport {
+        Frame::Kbd { modifiers, keys } => KBD_CHAN
+            .try_send(KeyboardReport {
                 modifier: modifiers,
                 reserved: 0,
                 leds: 0,
                 keycodes: keys,
-            });
-        }
-        Frame::Mouse { buttons, dx, dy, wheel } => {
-            let _ = MOUSE_CHAN.try_send(MouseReport {
+            })
+            .is_ok(),
+        #[cfg(not(feature = "mister"))]
+        Frame::Mouse { buttons, dx, dy, wheel } => MOUSE_CHAN
+            .try_send(MouseReport {
                 buttons,
                 x: dx,
                 y: dy,
                 wheel,
                 pan: 0,
-            });
-        }
-        Frame::Consumer { usage } => {
-            let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: usage });
-        }
+            })
+            .is_ok(),
+        #[cfg(feature = "mister")]
+        Frame::Mouse { .. } => false,
+        #[cfg(not(feature = "mister"))]
+        Frame::Consumer { usage } => CONSUMER_CHAN
+            .try_send(MediaKeyboardReport { usage_id: usage })
+            .is_ok(),
+        #[cfg(feature = "mister")]
+        Frame::Consumer { .. } => false,
         Frame::Delay { ms } => {
-            Timer::after_millis(ms as u64).await;
+            Timer::after_millis(ms.min(MAX_DELAY_MS) as u64).await;
+            true
         }
         Frame::Reset => {
-            let _ = KBD_CHAN.try_send(KeyboardReport {
-                modifier: 0,
-                reserved: 0,
-                leds: 0,
-                keycodes: [0; 6],
-            });
-            let _ = MOUSE_CHAN.try_send(MouseReport {
-                buttons: 0,
-                x: 0,
-                y: 0,
-                wheel: 0,
-                pan: 0,
-            });
-            let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: 0 });
+            // Drain any pending stale reports so the zero-state payload
+            // below cannot be the one dropped on a full channel.
+            while KBD_CHAN.try_receive().is_ok() {}
+            let kbd_ok = KBD_CHAN
+                .try_send(KeyboardReport {
+                    modifier: 0,
+                    reserved: 0,
+                    leds: 0,
+                    keycodes: [0; 6],
+                })
+                .is_ok();
+            #[cfg(not(feature = "mister"))]
+            let aux_ok = {
+                while MOUSE_CHAN.try_receive().is_ok() {}
+                while CONSUMER_CHAN.try_receive().is_ok() {}
+                MOUSE_CHAN
+                    .try_send(MouseReport {
+                        buttons: 0,
+                        x: 0,
+                        y: 0,
+                        wheel: 0,
+                        pan: 0,
+                    })
+                    .is_ok()
+                    && CONSUMER_CHAN
+                        .try_send(MediaKeyboardReport { usage_id: 0 })
+                        .is_ok()
+            };
+            #[cfg(feature = "mister")]
+            let aux_ok = true;
+            kbd_ok && aux_ok
         }
     }
 }
