@@ -7,7 +7,9 @@ use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter;
 use embedded_io_async::{Read, Write};
 use pico_keeb_protocol::binary::{Decoder, Frame, ACK};
-use usbd_hid::descriptor::{KeyboardReport, MediaKeyboardReport, MouseReport};
+use usbd_hid::descriptor::KeyboardReport;
+#[cfg(not(feature = "mister"))]
+use usbd_hid::descriptor::{MediaKeyboardReport, MouseReport};
 
 use crate::led::{LedEvent, LED_SIG};
 
@@ -23,7 +25,9 @@ pub type ConsumerWriter = HidWriter<'static, UsbDriverT, 2>;
 // ACK each frame the instant it's decoded, without waiting for the USB
 // host to poll the IN endpoint.
 pub static KBD_CHAN: Channel<CriticalSectionRawMutex, KeyboardReport, 32> = Channel::new();
+#[cfg(not(feature = "mister"))]
 pub static MOUSE_CHAN: Channel<CriticalSectionRawMutex, MouseReport, 32> = Channel::new();
+#[cfg(not(feature = "mister"))]
 pub static CONSUMER_CHAN: Channel<CriticalSectionRawMutex, MediaKeyboardReport, 16> =
     Channel::new();
 
@@ -64,6 +68,7 @@ async fn dispatch(frame: Frame) {
                 keycodes: keys,
             });
         }
+        #[cfg(not(feature = "mister"))]
         Frame::Mouse { buttons, dx, dy, wheel } => {
             let _ = MOUSE_CHAN.try_send(MouseReport {
                 buttons,
@@ -73,9 +78,16 @@ async fn dispatch(frame: Frame) {
                 pan: 0,
             });
         }
+        #[cfg(not(feature = "mister"))]
         Frame::Consumer { usage } => {
             let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: usage });
         }
+        // The mister build advertises only a keyboard interface, so mouse
+        // and consumer frames are accepted (ACKed by the caller) but
+        // intentionally have no effect — without this arm they would queue
+        // into channels nothing ever drains.
+        #[cfg(feature = "mister")]
+        Frame::Mouse { .. } | Frame::Consumer { .. } => {}
         Frame::Delay { ms } => {
             Timer::after_millis(ms as u64).await;
         }
@@ -86,14 +98,17 @@ async fn dispatch(frame: Frame) {
                 leds: 0,
                 keycodes: [0; 6],
             });
-            let _ = MOUSE_CHAN.try_send(MouseReport {
-                buttons: 0,
-                x: 0,
-                y: 0,
-                wheel: 0,
-                pan: 0,
-            });
-            let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: 0 });
+            #[cfg(not(feature = "mister"))]
+            {
+                let _ = MOUSE_CHAN.try_send(MouseReport {
+                    buttons: 0,
+                    x: 0,
+                    y: 0,
+                    wheel: 0,
+                    pan: 0,
+                });
+                let _ = CONSUMER_CHAN.try_send(MediaKeyboardReport { usage_id: 0 });
+            }
         }
     }
 }

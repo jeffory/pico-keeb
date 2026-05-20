@@ -87,6 +87,11 @@ endpoints (symptom: recurring `ChHltd set, but reason is unknown` lines in
 to a single keyboard interface and raises `bInterval` to 16 ms, which both
 the scheduler and the hub's per-port budget tolerate.
 
+`MOUSE`, `CLICK`, `SCROLL`, and `MEDIA` commands are still parsed and
+ACKed on a `mister` build (so existing scripts don't error out), but they
+have no effect — the firmware ships no mouse or consumer HID interface
+on that target.
+
 ## Flashing
 
 1. Hold **BOOTSEL** on the RP2040-Zero, then plug in its USB cable.
